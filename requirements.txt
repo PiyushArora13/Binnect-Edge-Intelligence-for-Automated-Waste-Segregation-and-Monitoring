@@ -1,3 +1,5 @@
-numpy
-opencv-python
-tensorflow==2.15.0
+numpy==1.24.3
+opencv-python==4.8.0
+tflite-runtime==2.13.0
+picamera2
+gpiozero
