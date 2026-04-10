@@ -1,10 +1,10 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 
-#define trig1 D1
-#define echo1 D2
-#define trig2 D5
-#define echo2 D6
+#define trig1 D2
+#define echo1 D1
+#define trig2 D3
+#define echo2 D4
 
 const char* ssid = "A52s";
 const char* password = "piyush@13";
