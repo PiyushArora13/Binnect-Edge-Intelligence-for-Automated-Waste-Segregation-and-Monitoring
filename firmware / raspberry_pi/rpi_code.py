@@ -1,9 +1,24 @@
 import time
 import numpy as np
 import cv2
-import RPi.GPIO as GPIO
 from tflite_runtime.interpreter import Interpreter
 from picamera2 import Picamera2
+
+from gpiozero import LED, DistanceSensor
+
+# -------------------------------
+# Ultrasonic (gpiozero)
+# -------------------------------
+sensor = DistanceSensor(echo=5, trigger=6)
+
+# -------------------------------
+# LEDs
+# -------------------------------
+led_wet = LED(17)
+led_dry = LED(27)
+
+led_wet.off()
+led_dry.off()
 
 # -------------------------------
 # Paths
@@ -13,106 +28,59 @@ LABEL_PATH = "/home/piyush/ids_env/New Folder/New folder/labels.txt"
 IMG_SIZE = 224
 
 # -------------------------------
-# GPIO Pins
-# -------------------------------
-LED_WET_PIN = 17
-LED_DRY_PIN = 27
-TRIG_PIN = 23
-ECHO_PIN = 24
-
-# -------------------------------
-# Load Labels
+# Load labels
 # -------------------------------
 with open(LABEL_PATH, "r") as f:
     labels = [line.strip() for line in f.readlines()]
 
-print("Labels:", labels)
-
 # -------------------------------
-# Load Model
+# Load model
 # -------------------------------
 interpreter = Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
+
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # -------------------------------
-# GPIO Setup
-# -------------------------------
-GPIO.setmode(GPIO.BCM)
-
-GPIO.setup(LED_WET_PIN, GPIO.OUT)
-GPIO.setup(LED_DRY_PIN, GPIO.OUT)
-GPIO.setup(TRIG_PIN, GPIO.OUT)
-GPIO.setup(ECHO_PIN, GPIO.IN)
-
-GPIO.output(LED_WET_PIN, GPIO.LOW)
-GPIO.output(LED_DRY_PIN, GPIO.LOW)
-
-# -------------------------------
-# Functions
-# -------------------------------
-def blink_led(pin, duration=2):
-    GPIO.output(pin, GPIO.HIGH)
-    print(f"LED ON (Pin {pin})")
-    time.sleep(duration)
-    GPIO.output(pin, GPIO.LOW)
-    print(f"LED OFF (Pin {pin})")
-
-def get_distance():
-    GPIO.output(TRIG_PIN, False)
-    time.sleep(0.05)
-
-    GPIO.output(TRIG_PIN, True)
-    time.sleep(0.00001)
-    GPIO.output(TRIG_PIN, False)
-
-    start_time = time.time()
-    stop_time = time.time()
-
-    timeout = time.time() + 0.04  # 40ms timeout
-
-    # Wait for echo start
-    while GPIO.input(ECHO_PIN) == 0:
-        start_time = time.time()
-        if start_time > timeout:
-            return 999  # No signal
-
-    # Wait for echo end
-    while GPIO.input(ECHO_PIN) == 1:
-        stop_time = time.time()
-        if stop_time > timeout:
-            return 999
-
-    duration = stop_time - start_time
-    distance = duration * 17150
-    return distance
-
-# -------------------------------
-# Camera Setup
+# Camera
 # -------------------------------
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration())
 picam2.start()
 time.sleep(2)
 
-last_classification = 0
+# -------------------------------
+# Timing
+# -------------------------------
+PREDICTION_INTERVAL = 4
+LED_DURATION = 2
 
-# -------------------------------
-# MAIN LOOP
-# -------------------------------
+cycle_start_time = time.time()
+
+last_label = ""
+last_confidence = 0
+
 try:
     while True:
-        dist = get_distance()
+        # à¤¦à¥‚à¤°à¥€ (meters â†’ cm)
+        distance = sensor.distance * 100
+        print(f"Distance: {distance:.2f} cm")
 
-        if dist < 18:
+        # ---------------------------------
+        # ONLY run detection if object < 12 cm
+        # ---------------------------------
+        if distance <= 15:
             current_time = time.time()
+            elapsed = current_time - cycle_start_time
 
-            # Run every 4 seconds
-            if current_time - last_classification >= 4:
-                last_classification = current_time
+            frame = picam2.capture_array()
 
-                frame = picam2.capture_array()
+            # Run prediction every 4 sec
+            if elapsed >= PREDICTION_INTERVAL:
+                cycle_start_time = current_time
+                elapsed = 0
+
                 img = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
 
                 if img.shape[2] == 4:
@@ -122,38 +90,54 @@ try:
 
                 interpreter.set_tensor(input_details[0]['index'], img)
                 interpreter.invoke()
-
                 output = interpreter.get_tensor(output_details[0]['index'])
+
                 pred_index = np.argmax(output)
                 prediction = labels[pred_index]
-                confidence = np.max(output)
+                confidence = float(np.max(output))
 
-                label = "Wet" if "Wet" in prediction else "Dry"
+                last_label = "Wet" if "Wet" in prediction else "Dry"
+                last_confidence = confidence
 
-                print(f"Prediction: {label} ({confidence:.2f})")
+                print(f"Prediction: {last_label} ({confidence:.2f})")
 
-                # LED Control
-                if label == "Wet":
-                    blink_led(LED_WET_PIN, 2)
-                else:
-                    blink_led(LED_DRY_PIN, 2)
+            # LED control (first 2 sec)
+            if elapsed < LED_DURATION:
+                if last_label == "Wet":
+                    led_wet.on()
+                    led_dry.off()
+                elif last_label == "Dry":
+                    led_wet.off()
+                    led_dry.on()
+            else:
+                led_wet.off()
+                led_dry.off()
 
-                # Display
-                cv2.putText(frame, f"{label} ({confidence:.2f})",
-                            (10, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                            1, (0, 255, 0), 2)
+            # Display
+            if last_label != "":
+                cv2.putText(frame,
+                            f"{last_label} ({last_confidence:.2f})",
+                            (10, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            1,
+                            (0, 255, 0),
+                            2)
 
-                cv2.imshow("Camera", frame)
-                cv2.waitKey(1)
+            cv2.imshow("Camera", frame)
 
         else:
-            print(f"No object detected: {dist:.2f} cm")
-            time.sleep(0.2)
+            # No object nearby
+            led_wet.off()
+            led_dry.off()
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
 except KeyboardInterrupt:
     print("Stopped")
 
 finally:
-    GPIO.cleanup()
+    led_wet.off()
+    led_dry.off()
     cv2.destroyAllWindows()
     picam2.stop()
